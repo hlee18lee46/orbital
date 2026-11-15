@@ -5,5 +5,5 @@ minimumReleaseAgeExclude:
   - next
 
 allowBuilds:
-  bufferutil: false
+  bufferutil: true
   utf-8-validate: true
