@@ -5,7 +5,9 @@ import { Stars, Sky } from '@react-three/drei'
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { Camera, Wallet, Check, LoaderCircle, X } from 'lucide-react'
+import { Camera, Wallet, Check, LoaderCircle, X, Flame, MessageCircle } from 'lucide-react'
+import MeteorChat from './MeteorChat'
+import MeteorLab, { MeteorAnimation, type MeteorFlight, type MeteorSettings } from './MeteorLab'
 
 type World = { id: string; name: string; gravity: number; ground: string; sky: string; description: string }
 const WORLDS: World[] = [
@@ -66,7 +68,7 @@ function Astronaut({ position, facing }: { position: React.RefObject<THREE.Group
   </group>
 }
 
-function GameScene({ world, controls, onTelemetry, resetKey }: { world: World; controls: React.RefObject<Controls>; onTelemetry: (height: number, grounded: boolean) => void; resetKey: number }) {
+function GameScene({ world, controls, onTelemetry, resetKey, meteorFlight, onMeteorImpact }: { world: World; controls: React.RefObject<Controls>; onTelemetry: (height: number, grounded: boolean) => void; resetKey: number; meteorFlight: MeteorFlight | null; onMeteorImpact: () => void }) {
   const player = useRef<THREE.Group>(null)
   const facing = useRef(0)
   const pos = useRef(new THREE.Vector3(0, 0, 0))
@@ -106,6 +108,7 @@ function GameScene({ world, controls, onTelemetry, resetKey }: { world: World; c
     <ambientLight intensity={world.id === 'moon' ? 0.7 : 1.2} />
     <directionalLight position={[15, 25, 10]} intensity={2.5} castShadow shadow-mapSize={[1024, 1024]} />
     <Landscape world={world} />
+    <MeteorAnimation flight={meteorFlight} gravity={world.gravity} onImpact={onMeteorImpact} />
     <Astronaut position={player} facing={facing} />
   </>
 }
@@ -122,6 +125,11 @@ export default function GravityExplorerGame() {
   const [isCapturing, setIsCapturing] = useState(false)
   const [mintResult, setMintResult] = useState<{explorer:string;mintAddress:string} | null>(null)
   const [mintError, setMintError] = useState('')
+  const [meteorOpen, setMeteorOpen] = useState(false)
+  const [chatOpen, setChatOpen] = useState(false)
+  const [meteorFlight, setMeteorFlight] = useState<MeteorFlight | null>(null)
+  const [meteorImpacted, setMeteorImpacted] = useState(false)
+  const launchMeteor = (settings: MeteorSettings) => { setMeteorImpacted(false); setMeteorFlight({ ...settings, id: Date.now() }) }
   useEffect(() => () => { if (preview) URL.revokeObjectURL(preview) }, [preview])
   async function takePhoto() {
     if (isCapturing || minting) return
@@ -170,6 +178,8 @@ export default function GravityExplorerGame() {
   useEffect(() => {
     const map: Record<string, keyof Controls> = { w: 'forward', arrowup: 'forward', s: 'backward', arrowdown: 'backward', a: 'left', arrowleft: 'left', d: 'right', arrowright: 'right', ' ': 'jump' }
     const handle = (e: KeyboardEvent, pressed: boolean) => {
+      const target = e.target
+      if (target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))) return
       const control = map[e.key.toLowerCase()]
       if (control) { e.preventDefault(); controls.current[control] = pressed }
     }
@@ -182,14 +192,17 @@ export default function GravityExplorerGame() {
     return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); window.removeEventListener('blur', blur) }
   }, [])
   const telemetry = useMemo(() => (h: number, g: boolean) => { setHeight(h); setGrounded(g) }, [])
-  const switchWorld = (id: string) => { setPhoto(null); setPreview(null); setMintResult(null); setMintError(''); controls.current = emptyControls(); setSelected(id); setHeight(0); setGrounded(true); setResetKey(v => v + 1); router.replace(`/play?world=${id}`) }
+  const switchWorld = (id: string) => { setMeteorFlight(null); setMeteorImpacted(false); setPhoto(null); setPreview(null); setMintResult(null); setMintError(''); controls.current = emptyControls(); setSelected(id); setHeight(0); setGrounded(true); setResetKey(v => v + 1); router.replace(`/play?world=${id}`) }
   return <main style={{ position: 'relative', height: '100dvh', width: '100%', overflow: 'hidden', background: '#080d17', color: 'white', fontFamily: 'system-ui, sans-serif' }}>
     <Suspense fallback={<div style={{ padding: 30 }}>Loading world…</div>}>
       <Canvas key={world.id} onCreated={({gl}) => {renderer.current = gl}} gl={{preserveDrawingBuffer:true,antialias:true}} shadows camera={{ position: [0, 4, 9], fov: 65 }} dpr={[1, 1.7]}>
-        <GameScene world={world} controls={controls} onTelemetry={telemetry} resetKey={resetKey} />
+        <GameScene world={world} controls={controls} onTelemetry={telemetry} resetKey={resetKey} meteorFlight={meteorFlight} onMeteorImpact={() => setMeteorImpacted(true)} />
       </Canvas>
     </Suspense>
     <button onClick={() => router.push('/')} style={{position:'absolute',left:20,bottom:90,zIndex:10,padding:12,borderRadius:10}}>← Landing</button>
+    {/* AI chat: left-side science tutor, toggled without interrupting the 3D scene */}
+    <button type="button" onClick={() => setChatOpen(v => !v)} aria-expanded={chatOpen} className="absolute bottom-40 left-4 z-30 flex items-center gap-2 rounded-full border border-sky-300/40 bg-sky-600 px-4 py-3 text-sm font-bold text-white shadow-xl hover:bg-sky-500 sm:bottom-32 sm:left-5"><MessageCircle size={19}/> Ask Orbit AI</button>
+    {chatOpen && <MeteorChat world={world.name} onClose={() => setChatOpen(false)} />}
     {/* Wallet: prominent pill button at the top right */}
     <div className="absolute right-4 top-4 z-30 sm:right-5 sm:top-5">
       <button
@@ -203,6 +216,9 @@ export default function GravityExplorerGame() {
       </button>
     </div>
 
+    {/* Meteor Lab launcher */}
+    <button type="button" onClick={() => setMeteorOpen(v => !v)} aria-expanded={meteorOpen} className="absolute bottom-48 right-4 z-30 flex items-center gap-2 rounded-full border border-orange-300/50 bg-orange-600 px-4 py-3 text-sm font-bold text-white shadow-lg hover:bg-orange-500 sm:bottom-32 sm:right-6"><Flame size={19}/> Meteor Lab</button>
+    {meteorOpen && <MeteorLab worldName={world.name} gravity={world.gravity} onLaunch={launchMeteor} onClose={() => setMeteorOpen(false)} impacted={meteorImpacted} />}
     {/* Photo: circular camera shutter at the bottom right */}
     <div className="absolute bottom-24 right-4 z-30 flex flex-col items-center sm:bottom-8 sm:right-6">
       <button
@@ -238,7 +254,7 @@ export default function GravityExplorerGame() {
       </div>
     </div>}
     {!preview && mintError && <div role='alert' style={{position:'absolute',bottom:175,right:20,color:'#ffaaaa',background:'#152033',padding:10,zIndex:10}}>{mintError}</div>}
-    <div style={{ position: 'absolute', top: 20, left: 20, maxWidth: 330, padding: 18, background: '#0c1423dd', borderRadius: 14, border: '1px solid #ffffff22' }}>
+    <div style={{ position: 'absolute', top: 20, left: 20, maxWidth: 330, padding: 18, display: chatOpen ? 'none' : undefined, background: '#0c1423dd', borderRadius: 14, border: '1px solid #ffffff22' }}>
       <div style={{ fontSize: 12, letterSpacing: 2, color: '#9fc9ff' }}>GRAVITY EXPLORER</div>
       <h1 style={{ fontSize: 28, margin: '8px 0' }}>{world.name}</h1>
       <p style={{ margin: '0 0 14px', color: '#cad3e2' }}>{world.description}</p>
