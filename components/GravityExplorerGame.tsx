@@ -4,6 +4,8 @@ import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { Stars, Sky } from '@react-three/drei'
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
+import { useRouter, useSearchParams } from 'next/navigation'
+import { Camera, Wallet, Check, LoaderCircle, X } from 'lucide-react'
 
 type World = { id: string; name: string; gravity: number; ground: string; sky: string; description: string }
 const WORLDS: World[] = [
@@ -109,7 +111,57 @@ function GameScene({ world, controls, onTelemetry, resetKey }: { world: World; c
 }
 
 export default function GravityExplorerGame() {
-  const [selected, setSelected] = useState('earth')
+  const router = useRouter()
+  const params = useSearchParams()
+  const [selected, setSelected] = useState(() => { const id = params.get('world'); return WORLDS.some(w => w.id === id) ? id! : 'earth' })
+  const renderer = useRef<THREE.WebGLRenderer | null>(null)
+  const [photo, setPhoto] = useState<Blob | null>(null)
+  const [preview, setPreview] = useState<string | null>(null)
+  const [wallet, setWallet] = useState('')
+  const [minting, setMinting] = useState(false)
+  const [isCapturing, setIsCapturing] = useState(false)
+  const [mintResult, setMintResult] = useState<{explorer:string;mintAddress:string} | null>(null)
+  const [mintError, setMintError] = useState('')
+  useEffect(() => () => { if (preview) URL.revokeObjectURL(preview) }, [preview])
+  async function takePhoto() {
+    if (isCapturing || minting) return
+    setIsCapturing(true)
+    try {
+      const canvas = renderer.current?.domElement
+      if (!canvas) throw new Error('3D scene is not ready')
+      const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'))
+      if (!blob) throw new Error('Unable to capture screenshot')
+      setPhoto(blob)
+      setPreview(URL.createObjectURL(blob))
+      setMintResult(null)
+      setMintError('')
+    } catch (err) {
+      setMintError(err instanceof Error ? err.message : 'Photo capture failed')
+    } finally {
+      setIsCapturing(false)
+    }
+  }
+  async function connectWallet() {
+    const provider = (window as Window & {solana?: {isPhantom?:boolean;connect:()=>Promise<{publicKey:{toString:()=>string}}>}}).solana
+    if (!provider?.isPhantom) { setMintError('Install Phantom to connect your wallet'); return }
+    try { const result = await provider.connect(); setWallet(result.publicKey.toString()); setMintError('') }
+    catch { setMintError('Wallet connection cancelled') }
+  }
+  async function mintPhoto() {
+    if (!photo || !wallet || minting) return
+    setMinting(true); setMintError('')
+    try {
+      const form = new FormData()
+      form.append('image', photo, `${world.id}-photo.png`)
+      form.append('recipientWallet', wallet)
+      form.append('planet', world.id)
+      const response = await fetch('/api/mint-nft', {method:'POST',body:form})
+      const data = await response.json()
+      if (!response.ok || !data.ok) throw new Error(data.error || 'Mint failed')
+      setMintResult({explorer:data.explorer,mintAddress:data.nft.mintAddress})
+    } catch (err) { setMintError(err instanceof Error ? err.message : 'Mint failed') }
+    finally { setMinting(false) }
+  }
   const [height, setHeight] = useState(0)
   const [grounded, setGrounded] = useState(true)
   const [resetKey, setResetKey] = useState(0)
@@ -130,13 +182,62 @@ export default function GravityExplorerGame() {
     return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); window.removeEventListener('blur', blur) }
   }, [])
   const telemetry = useMemo(() => (h: number, g: boolean) => { setHeight(h); setGrounded(g) }, [])
-  const switchWorld = (id: string) => { controls.current = emptyControls(); setSelected(id); setHeight(0); setGrounded(true); setResetKey(v => v + 1) }
+  const switchWorld = (id: string) => { setPhoto(null); setPreview(null); setMintResult(null); setMintError(''); controls.current = emptyControls(); setSelected(id); setHeight(0); setGrounded(true); setResetKey(v => v + 1); router.replace(`/play?world=${id}`) }
   return <main style={{ position: 'relative', height: '100dvh', width: '100%', overflow: 'hidden', background: '#080d17', color: 'white', fontFamily: 'system-ui, sans-serif' }}>
     <Suspense fallback={<div style={{ padding: 30 }}>Loading world…</div>}>
-      <Canvas key={world.id} shadows camera={{ position: [0, 4, 9], fov: 65 }} dpr={[1, 1.7]}>
+      <Canvas key={world.id} onCreated={({gl}) => {renderer.current = gl}} gl={{preserveDrawingBuffer:true,antialias:true}} shadows camera={{ position: [0, 4, 9], fov: 65 }} dpr={[1, 1.7]}>
         <GameScene world={world} controls={controls} onTelemetry={telemetry} resetKey={resetKey} />
       </Canvas>
     </Suspense>
+    <button onClick={() => router.push('/')} style={{position:'absolute',left:20,bottom:90,zIndex:10,padding:12,borderRadius:10}}>← Landing</button>
+    {/* Wallet: prominent pill button at the top right */}
+    <div className="absolute right-4 top-4 z-30 sm:right-5 sm:top-5">
+      <button
+        type="button"
+        onClick={connectWallet}
+        className="flex items-center gap-2 rounded-full border border-violet-300/40 bg-violet-600 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-violet-900/40 transition hover:scale-105 hover:bg-violet-500 active:scale-95"
+        aria-label={wallet ? 'Phantom wallet connected' : 'Connect Phantom wallet'}
+      >
+        {wallet ? <Check size={18} /> : <Wallet size={18} />}
+        <span>{wallet ? `${wallet.slice(0, 5)}…${wallet.slice(-4)}` : 'Connect Phantom'}</span>
+      </button>
+    </div>
+
+    {/* Photo: circular camera shutter at the bottom right */}
+    <div className="absolute bottom-24 right-4 z-30 flex flex-col items-center sm:bottom-8 sm:right-6">
+      <button
+        type="button"
+        onClick={takePhoto}
+        disabled={isCapturing || minting}
+        aria-label="Take Photo"
+        className="flex h-[76px] w-[76px] items-center justify-center rounded-full border-4 border-white bg-white/20 shadow-xl backdrop-blur-md transition hover:scale-105 active:scale-95 disabled:cursor-wait disabled:opacity-50"
+      >
+        <span className="flex h-14 w-14 items-center justify-center rounded-full bg-white text-slate-900">
+          {isCapturing ? <LoaderCircle size={27} className="animate-spin" /> : <Camera size={27} />}
+        </span>
+      </button>
+      <span className="mt-1 text-xs font-semibold text-white drop-shadow-lg">Take Photo</span>
+    </div>
+    {preview && <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/65 p-4">
+      <div className="w-full max-w-[460px] rounded-2xl border border-white/20 bg-[#0b1525] p-5 text-white shadow-2xl">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <h2 className="text-lg font-bold">Planetary Photo · {world.name}</h2>
+          <button type="button" onClick={() => { setPreview(null); setPhoto(null) }} aria-label="Close photo preview" className="rounded-full p-2 text-slate-300 hover:bg-white/10"><X size={20} /></button>
+        </div>
+        {/* Blob URL is generated from the live Three.js canvas */}
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={preview} alt={`${world.name} screenshot`} className="w-full rounded-xl" />
+        <p className="my-3 text-sm text-slate-300">Gravity: {world.gravity} m/s² · Solana Devnet</p>
+        {mintError && <p role="alert" className="mb-3 text-sm text-red-300">{mintError}</p>}
+        {mintResult && <a href={mintResult.explorer} target="_blank" rel="noopener noreferrer" className="mb-3 block text-sm text-sky-300 underline">View NFT on Solana Explorer</a>}
+        <div className="flex flex-wrap gap-2">
+          {!wallet && <button type="button" onClick={connectWallet} className="rounded-full bg-violet-600 px-4 py-3 text-sm font-semibold text-white hover:bg-violet-500"><Wallet size={16} className="mr-2 inline" />Connect Phantom</button>}
+          <button type="button" disabled={minting || !wallet || !!mintResult} onClick={mintPhoto} className="rounded-full bg-sky-500 px-5 py-3 text-sm font-bold text-white hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-50">{minting ? 'Minting…' : mintResult ? 'Minted ✓' : 'Mint as NFT'}</button>
+          <button type="button" onClick={() => { setPreview(null); setPhoto(null) }} className="rounded-full border border-white/30 px-4 py-3 text-sm font-medium text-white hover:bg-white/10">Close</button>
+        </div>
+      </div>
+    </div>}
+    {!preview && mintError && <div role='alert' style={{position:'absolute',bottom:175,right:20,color:'#ffaaaa',background:'#152033',padding:10,zIndex:10}}>{mintError}</div>}
     <div style={{ position: 'absolute', top: 20, left: 20, maxWidth: 330, padding: 18, background: '#0c1423dd', borderRadius: 14, border: '1px solid #ffffff22' }}>
       <div style={{ fontSize: 12, letterSpacing: 2, color: '#9fc9ff' }}>GRAVITY EXPLORER</div>
       <h1 style={{ fontSize: 28, margin: '8px 0' }}>{world.name}</h1>
@@ -147,7 +248,7 @@ export default function GravityExplorerGame() {
       <div style={{ fontSize: 12, color: '#b4c5d8', marginTop: 12 }}>WASD / arrows to move · Space to jump</div>
       <button onClick={() => setResetKey(v => v + 1)} style={{ marginTop: 12, padding: '8px 12px', cursor: 'pointer', borderRadius: 8 }}>Reset position</button>
     </div>
-    <div style={{ position: 'absolute', right: 20, top: 20, display: 'flex', flexDirection: 'column', gap: 8, background: '#0c1423dd', padding: 12, borderRadius: 14 }}>
+    <div style={{ position: 'absolute', right: 20, top: 86, display: 'flex', flexDirection: 'column', gap: 8, background: '#0c1423dd', padding: 12, borderRadius: 14 }}>
       {WORLDS.map(w => <button key={w.id} onClick={() => switchWorld(w.id)} style={{ background: selected === w.id ? '#3074b9' : '#243147', color: '#fff', border: '1px solid #ffffff30', padding: '10px 16px', borderRadius: 8, cursor: 'pointer', textAlign: 'left' }}>{w.name} · {w.gravity} m/s²</button>)}
     </div>
     <div style={{ position: 'absolute', bottom: 24, left: '50%', transform: 'translateX(-50%)', display: 'flex', gap: 8 }}>
